@@ -4,8 +4,8 @@ on:
   push:
     branches:
       - main        # main 브랜치 푸시 시 자동 배포
-    paths:
-      - 'app/**'    # app 폴더 변경 시에만 실행
+    # paths:
+    #   - 'app/**'    # app 폴더 변경 시에만 실행
 
 env:
   AWS_REGION:       ap-northeast-2
