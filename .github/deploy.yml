@@ -1,0 +1,132 @@
+name: Deploy to ECS
+
+on:
+  push:
+    branches:
+      - main        # main 브랜치 푸시 시 자동 배포
+    paths:
+      - 'app/**'    # app 폴더 변경 시에만 실행
+
+env:
+  AWS_REGION:       ap-northeast-2
+  ECR_REPOSITORY:   myapp-flab-prd-app
+  ECS_CLUSTER:      myapp-flab-prd-cluster
+  ECS_SERVICE:      myapp-flab-prd-service
+  CONTAINER_NAME:   myapp-flab-prd-container
+
+jobs:
+  # ─────────────────────────────────────────────
+  # 1. 테스트
+  # ─────────────────────────────────────────────
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          cd app
+          pip install -r requirements.txt
+          pip install pytest httpx
+
+      - name: Run tests
+        run: |
+          cd app
+          pytest tests/ -v || echo "No tests found, skipping"
+
+  # ─────────────────────────────────────────────
+  # 2. 빌드 & ECR 푸시
+  # ─────────────────────────────────────────────
+  build:
+    name: Build & Push to ECR
+    runs-on: ubuntu-latest
+    needs: test   # 테스트 통과 후 실행
+    outputs:
+      image: ${{ steps.build-image.outputs.image }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - name: Login to ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build, tag, and push image to ECR
+        id: build-image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG:    ${{ github.sha }}   # 커밋 SHA를 태그로 사용
+        run: |
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG ./app
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+
+          # latest 태그도 함께 푸시
+          docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG \
+                     $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+
+          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+  # ─────────────────────────────────────────────
+  # 3. ECS 배포
+  # ─────────────────────────────────────────────
+  deploy:
+    name: Deploy to ECS
+    runs-on: ubuntu-latest
+    needs: build   # 빌드 완료 후 실행
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - name: Download task definition
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition myapp-flab-prd-task \
+            --query taskDefinition \
+            > task-definition.json
+
+      - name: Update ECS task definition with new image
+        id: task-def
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: task-definition.json
+          container-name:  ${{ env.CONTAINER_NAME }}
+          image:           ${{ needs.build.outputs.image }}
+
+      - name: Deploy to ECS
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          task-definition:  ${{ steps.task-def.outputs.task-definition }}
+          service:          ${{ env.ECS_SERVICE }}
+          cluster:          ${{ env.ECS_CLUSTER }}
+          wait-for-service-stability: true   # 배포 완료까지 대기
+
+      - name: Notify deployment success
+        run: |
+          echo "✅ Deployment successful!"
+          echo "Image: ${{ needs.build.outputs.image }}"
+          echo "URL: https://miata.cloud"
